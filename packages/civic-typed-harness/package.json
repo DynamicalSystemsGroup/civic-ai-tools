@@ -1,0 +1,68 @@
+{
+  "name": "@typedstandards/civic-typed-harness",
+  "version": "0.2.0",
+  "description": "Civic-domain harness for Typed Standards evidence packages — the DOMAIN layer of the ADR-0021 format/domain line: civic PROV-O vocabulary and provenance builder, datHere envelope-policy derivations, and the capture machinery (trace builder, skill-metadata extraction, data-source population, adversarial rubric core). Derives; @typedstandards/produce-core assembles.",
+  "license": "MIT",
+  "author": "Nathan Storey",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "node --test --experimental-strip-types \"src/**/*.test.ts\"",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "dependencies": {
+    "@typedstandards/produce-core": "^0.2.0"
+  },
+  "devDependencies": {
+    "@typedstandards/verify-core": "^0.8.0",
+    "@typescript-eslint/parser": "^8",
+    "eslint": "^9",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/npstorey/civic-ai-tools.git",
+    "directory": "packages/civic-typed-harness"
+  },
+  "homepage": "https://github.com/npstorey/civic-ai-tools/tree/main/packages/civic-typed-harness#readme",
+  "bugs": {
+    "url": "https://github.com/npstorey/civic-ai-tools/issues"
+  },
+  "keywords": [
+    "typed-standards",
+    "evidence",
+    "provenance",
+    "civic",
+    "harness",
+    "prov-o",
+    "otel"
+  ]
+}

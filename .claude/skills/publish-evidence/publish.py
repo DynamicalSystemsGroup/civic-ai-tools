@@ -43,6 +43,11 @@ Environment variables (read at run time, never logged):
                                     resolved via ``op read``.
     CIVICAITOOLS_BASE_URL           Override the publish base URL
                                     (default ``https://www.civicaitools.org``).
+    CIVICAITOOLS_BLOB_HOST          Escape hatch only. Public blob-store
+                                    host used to build the package
+                                    ``blobHint``. Unset by default — the
+                                    host is read out of the server's own
+                                    responses (see ``resolve_blob_host``).
     XDG_CONFIG_HOME                 Respected when locating the
                                     credentials file.
 
@@ -66,6 +71,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import webbrowser
@@ -80,7 +86,14 @@ DEV_COOKIE_NAME = "next-auth.session-token"
 ALLOWED_SOURCES = {"socrata", "data-commons"}
 ALLOWED_PROMPT_VISIBILITY = {"full_text", "hash_only"}
 ALLOWED_CAPTURE_MODES = {"single_final_turn", "full_conversation"}
-ALLOWED_VISIBILITY = {"published", "committed"}
+ALLOWED_VISIBILITY = {"public", "sealed"}
+# Legacy visibility literals (pre-ADR-0016 §A: "committed" collided with
+# "git commit" for a VCS-native adopter; "published" was act-shaped for a
+# field named `visibility`). The API accepts all four literals indefinitely
+# (civic-ai-tools#71 back-compat SHOULD) and this skill mirrors that: legacy
+# values are never a hard error, only normalized with a deprecation note
+# (see `normalize_visibility` below). Canonical values are what get sent.
+LEGACY_VISIBILITY_ALIASES = {"published": "public", "committed": "sealed"}
 ALLOWED_TURN_ROLES = {"user", "assistant", "tool"}
 # Capture-method enum per ADR-0003. The skill always emits
 # ``claude-code-jsonl-readback``; the other values exist so the server's
@@ -514,7 +527,44 @@ def negative_pattern_scan(payload: dict[str, Any]) -> None:
     sys.exit(2)
 
 
+def normalize_visibility(payload: dict[str, Any]) -> None:
+    """Map a legacy `visibility` literal to its ADR-0016 §A canonical value.
+
+    Mutates ``payload["visibility"]`` in place when a legacy alias is
+    present (``published`` -> ``public``, ``committed`` -> ``sealed``).
+    Legacy input is accepted indefinitely and never hard-errors — the
+    substitution is only reported, on stderr, as a deprecation note.
+    Canonical values and unset/unrecognized values pass through
+    untouched (an unrecognized value is caught by ``validate_payload``).
+
+    Called from ``validate_payload`` (its first step) so every caller —
+    ``main()`` after merging the ``--visibility`` CLI override into
+    ``payload``, and any direct/test caller of ``validate_payload`` —
+    gets the same normalization + note regardless of whether the legacy
+    value came from the payload JSON or the CLI flag.
+    """
+    raw = payload.get("visibility")
+    canonical = LEGACY_VISIBILITY_ALIASES.get(raw)
+    if canonical is not None:
+        eprint(
+            f"note: visibility value {raw!r} is a legacy alias — ADR-0016 "
+            "§A renamed `committed` -> `sealed` and `published` -> "
+            f"`public`. Sending `{canonical}`. Prefer `--visibility "
+            f"{canonical}` (or `\"visibility\": \"{canonical}\"` in the "
+            "payload) going forward; the legacy spelling keeps working but "
+            "is deprecated."
+        )
+        payload["visibility"] = canonical
+
+
 def validate_payload(payload: dict[str, Any]) -> None:
+    # Legacy `visibility` literals are mapped to their canonical value
+    # before anything else runs, so every downstream reader of
+    # ``payload["visibility"]`` (this function's own check below,
+    # ``build_request_body``, direct callers in tests) sees only
+    # canonical values or a genuinely-invalid one.
+    normalize_visibility(payload)
+
     required = [
         "title",
         "summary",
@@ -573,7 +623,7 @@ def validate_payload(payload: dict[str, Any]) -> None:
             f"{sorted(ALLOWED_CAPTURE_METHODS)} (got {capture_method!r})"
         )
         sys.exit(2)
-    visibility = payload.get("visibility", "published")
+    visibility = payload.get("visibility", "public")
     if visibility not in ALLOWED_VISIBILITY:
         eprint(
             f"error: visibility must be one of "
@@ -913,11 +963,15 @@ def build_request_body(
         "title": payload["title"],
         "summary": payload["summary"],
         "captureMethod": payload.get("captureMethod", DEFAULT_CAPTURE_METHOD),
-        # Request-level visibility (civic-ai-tools#71): "published" (default —
-        # the skill is invoked as "publish this", so public is the expected
-        # outcome) or "committed" (signed + transparency-logged, content
-        # private; promote later from the civicaitools.org dashboard).
-        "visibility": payload.get("visibility", "published"),
+        # Request-level visibility (civic-ai-tools#71; ADR-0016 §A): "public"
+        # (default — the skill is invoked as "publish this", so public is
+        # the expected outcome) or "sealed" (signed + transparency-logged,
+        # content private; promote later from the civicaitools.org
+        # dashboard). Legacy `published`/`committed` payload values are
+        # normalized to `public`/`sealed` by `validate_payload` (which
+        # always runs before this) — this key only ever sees canonical
+        # values or an absent key by the time it's read here.
+        "visibility": payload.get("visibility", "public"),
     }
     if payload.get("duration_ms") is not None:
         body["duration_ms"] = payload["duration_ms"]
@@ -1049,11 +1103,101 @@ def post_evidence(
         sys.exit(3)
 
 
-VERCEL_BLOB_HOST = "ayoozcuc1c16axbw.public.blob.vercel-storage.com"
+# --------------------------------------------------------------------------
+# Package blob URL — host derived from the server's own responses
+# --------------------------------------------------------------------------
+#
+# The public blob-store host is instance identity, not protocol: every
+# deployment of the registry has its own store. It is therefore never a
+# constant in this script (which adopters copy verbatim) — it is read back
+# out of URLs the target instance itself produced.
 
 
-def blob_url_for(package_hash: str) -> str:
-    return f"https://{VERCEL_BLOB_HOST}/evidence-packages/{package_hash}.json"
+def blob_host_from_url(url: Any) -> str | None:
+    """Return the host component of ``url``, or None if it isn't a usable
+    absolute HTTP(S) URL."""
+    if not isinstance(url, str) or not url.strip():
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(url.strip())
+    except ValueError:
+        return None
+    if parsed.scheme not in ("https", "http") or not parsed.netloc:
+        return None
+    return parsed.netloc
+
+
+def blob_url_for(package_hash: str, blob_host: str) -> str:
+    """Canonical, content-addressable package-blob URL on ``blob_host``.
+
+    Mirrors the server's own key convention for public (not sealed)
+    packages — ``evidence-packages/<packageHash>.json``, no random
+    suffix. Sealed packages use a random, non-hash-derivable key instead
+    (server-side; see the "Sealed responses" note in ``main()``). The
+    host comes from ``resolve_blob_host``; there is no default.
+    """
+    return f"https://{blob_host}/evidence-packages/{package_hash}.json"
+
+
+def fetch_commitment_blob_host(base_url: str, slug: str) -> str | None:
+    """Read this instance's blob host off the public commitment view.
+
+    ``GET /api/evidence/<slug>/commitment`` needs no authentication and
+    carries ``packageUrl`` — the canonical, public package-blob URL for
+    the record just published. Best-effort: any failure returns None and
+    the caller degrades to omitting the hint rather than guessing a host.
+    """
+    url = f"{base_url.rstrip('/')}/api/evidence/{slug}/commitment"
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"User-Agent": "civic-ai-tools-publish-evidence/0.3"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            parsed = json.loads(resp.read().decode("utf-8"))
+    except (OSError, ValueError):
+        # OSError covers urllib's URLError/HTTPError and socket timeouts;
+        # ValueError covers json.JSONDecodeError and decode failures.
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return blob_host_from_url(parsed.get("packageUrl"))
+
+
+def resolve_blob_host(
+    *,
+    override: str | None,
+    base_url: str,
+    slug: str,
+    observed_urls: list[str],
+) -> str | None:
+    """Resolve the target instance's public blob host.
+
+    Resolution order:
+
+    1. ``--blob-host`` / ``CIVICAITOOLS_BLOB_HOST`` — documented escape
+       hatch for environments where the commitment endpoint isn't
+       reachable from where the skill runs. Unset in the default flow.
+    2. The commitment view's ``packageUrl`` — server-authoritative for
+       the package blob on whichever instance was just published to.
+    3. A blob URL this run already received from the store while
+       uploading BlobRef fields (same store as the package blob). Used
+       only when (2) is unreachable, and costs no extra request.
+
+    Returns None when no response offered a host; the caller then omits
+    the hint instead of guessing.
+    """
+    if override and override.strip():
+        return blob_host_from_url(override) or override.strip().strip("/")
+    host = fetch_commitment_blob_host(base_url, slug)
+    if host:
+        return host
+    for url in observed_urls:
+        host = blob_host_from_url(url)
+        if host:
+            return host
+    return None
 
 
 def _redacted_preview(
@@ -1287,6 +1431,17 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--blob-host",
+        default=os.environ.get("CIVICAITOOLS_BLOB_HOST", ""),
+        help=(
+            "Escape hatch: the target instance's public blob-store host "
+            "(e.g. `<store>.public.blob.vercel-storage.com`), used to "
+            "build the `blobHint` in the result. Not needed in the normal "
+            "flow — the host is read from the server's own commitment "
+            "response. Defaults to $CIVICAITOOLS_BLOB_HOST."
+        ),
+    )
+    parser.add_argument(
         "--dev",
         action="store_true",
         help="Use the dev cookie name `next-auth.session-token` instead of "
@@ -1308,12 +1463,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--visibility",
-        choices=sorted(ALLOWED_VISIBILITY),
+        choices=sorted(ALLOWED_VISIBILITY | set(LEGACY_VISIBILITY_ALIASES)),
         default=None,
-        help="Override the payload's `visibility` (civic-ai-tools#71): "
-        "`published` (default — content public + listed) or `committed` "
-        "(signed, timestamped, and registered on the transparency log, "
-        "but content stays private; publish later from the dashboard).",
+        help="Override the payload's `visibility` (civic-ai-tools#71; "
+        "ADR-0016 §A): `public` (default — content public + listed) or "
+        "`sealed` (signed, timestamped, and registered on the "
+        "transparency log, but content stays private; publish later from "
+        "the dashboard). Legacy `published`/`committed` are still "
+        "accepted and mapped automatically to `public`/`sealed`, with a "
+        "deprecation note on stderr.",
     )
     parser.add_argument(
         "--max-inline-bytes",
@@ -1404,8 +1562,12 @@ def main() -> None:
     auth_method, auth_value = resolve_auth(args.base_url)
     cookie_name = DEV_COOKIE_NAME if args.dev else PROD_COOKIE_NAME
 
+    # Blob URLs the store returns during this run. Kept as a fallback
+    # source for the instance's blob host (see resolve_blob_host).
+    uploaded_blob_urls: list[str] = []
+
     def do_upload(value: Any, content_type: str, extension: str) -> dict[str, Any]:
-        return upload_blob_ref(
+        blob_ref = upload_blob_ref(
             value=value,
             content_type=content_type,
             extension=extension,
@@ -1414,6 +1576,9 @@ def main() -> None:
             auth_value=auth_value,
             cookie_name=cookie_name,
         )
+        if isinstance(blob_ref.get("url"), str):
+            uploaded_blob_urls.append(blob_ref["url"])
+        return blob_ref
 
     body, _stats = build_request_body(
         payload,
@@ -1432,11 +1597,15 @@ def main() -> None:
         eprint(json.dumps(result, indent=2))
         sys.exit(4)
 
-    # Committed responses carry no public `url` (civic-ai-tools#71): the
-    # detail page is creator-only and the content blob lives at a random,
-    # non-derivable key — so neither evidenceUrl-as-public nor a hash-derived
-    # blobHint would be honest. The hint is omitted and the URL labeled.
-    visibility = result.get("visibility", "published")
+    # Sealed responses carry no public `url` (civic-ai-tools#71; ADR-0016
+    # §A): the detail page is creator-only and the content blob lives at a
+    # random, non-derivable key — so neither evidenceUrl-as-public nor a
+    # hash-derived blobHint would be honest. The hint is omitted and the URL
+    # labeled. `result["visibility"]` is whatever the server returned
+    # verbatim — a current instance serves `sealed`/`public`, but the skill
+    # may be pointed at an older instance still serving `committed`/
+    # `published`, so the comparison below tolerates both pairs.
+    visibility = result.get("visibility", "public")
     relative_url = result.get("url") or f"/evidence/{slug}"
     full_url = f"{args.base_url.rstrip('/')}{relative_url}"
 
@@ -1450,15 +1619,31 @@ def main() -> None:
         )),
         "readbackUrl": f"{args.base_url.rstrip('/')}/api/evidence/{slug}",
     }
-    if visibility == "committed":
+    if visibility in ("sealed", "committed"):
         output["note"] = (
-            "Committed (not published): the page and read-back URLs are "
+            "Sealed (not public): the page and read-back URLs are "
             "creator-only; the public commitment is at "
             f"{args.base_url.rstrip('/')}/api/evidence/{slug}/commitment. "
             "Publish from the civicaitools.org dashboard when ready."
         )
     else:
-        output["blobHint"] = blob_url_for(package_hash)
+        blob_host = resolve_blob_host(
+            override=args.blob_host,
+            base_url=args.base_url,
+            slug=slug,
+            observed_urls=uploaded_blob_urls,
+        )
+        if blob_host:
+            output["blobHint"] = blob_url_for(package_hash, blob_host)
+        else:
+            eprint(
+                "warning: could not resolve this instance's blob host from "
+                "the server's responses, so `blobHint` is omitted. The "
+                "canonical package URL is served as `packageUrl` by "
+                f"{args.base_url.rstrip('/')}/api/evidence/{slug}/commitment; "
+                "set CIVICAITOOLS_BLOB_HOST (or --blob-host) if that "
+                "endpoint isn't reachable from here."
+            )
 
     print(json.dumps(output, indent=2))
 

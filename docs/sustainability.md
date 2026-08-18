@@ -5,7 +5,7 @@
 
 ## Current state
 
-civic-ai-tools is a solo-maintained, self-funded, open-source project. All three repositories are MIT-licensed. The demo website runs on Vercel Pro; the Socrata MCP server runs on Render's paid tier; storage is Neon Postgres plus Vercel Blob. Costs are personal; maintainer time is uncompensated.
+civic-ai-tools is a solo-maintained, self-funded, open-source project. All four repositories are MIT-licensed. The demo website runs on Vercel Pro; the Socrata MCP server runs on Render's paid tier; storage is Neon Postgres plus Vercel Blob. Costs are personal; maintainer time is uncompensated.
 
 Release cadence has held at one-to-two-week coordinated cross-repo tags since v0.1.0 (March 2026). The evidence system shipped at v0.6.0, multi-source data access shipped at v0.7.0 and v0.8.0. `ROADMAP.md` is refreshed quarterly.
 
@@ -30,10 +30,23 @@ Without adopting commitments that would require a team, funding could accelerate
 
 ## What funding would not change
 
-- The MIT license on all three repositories.
+- The MIT license on all four repositories.
 - The *disclosure, not validation* stance in the evidence system.
 - The public, issue-linked roadmap and the ADR process.
 - The out-of-scope list in `ROADMAP.md` Section 7 — including no proprietary data sources, no platform-issued correctness claims, no enterprise SLAs, and no editorial moderation at scale.
+
+## Succession artifact
+
+The succession *trigger* is committed in `ROADMAP.md` Section 3 (#7: no stealth deprecation; any known successor or fork linked). This section records *what a successor would need to hold* — the concrete assets behind the standard and the reference deployment:
+
+- **Domains.** `civicaitools.org` (live) and `typedstandards.org` (registration in flight); registrar accounts are maintainer-held.
+- **Registry signing keys.** The platform Ed25519 signing key (`EVIDENCE_SIGNING_KEY` / `EVIDENCE_KEY_ID`) and the trust-registry contents served at `/.well-known/typed-publisher.json`. Rotation runbook: `civic-ai-tools-website/docs/key-rotation.md`.
+- **The publisher index** reserved at `typedstandards.org` (indexing-only; spec §8.13).
+- **npm scope.** `@typedstandards` (the `verify-core` releases).
+- **Archival DOI.** A Zenodo DOI is deferred to spec v0.2 (ADR-0012); once minted it joins this list.
+- **Fast-handoff contact.** Currently the maintainer (see the reviewer-orientation document); a project inbox is planned alongside the typedstandards.org launch.
+
+All of these are currently maintainer-held — the honest bus-factor-one state this stub exists to disclose. A named custody / handoff arrangement is part of the institutional-stewardship discussion referenced in the community-review orientation document.
 
 ## Accountability
 
